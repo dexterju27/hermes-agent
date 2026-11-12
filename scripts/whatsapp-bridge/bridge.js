@@ -35,6 +35,7 @@ import { attachPasskeyFlow, loadPasskeySigner } from './passkey_socket.js';
 import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
+import { createGroupCreatorGate } from './group_creator_gate.js';
 import {
   addMentions,
   buildPollPayload,
@@ -141,6 +142,14 @@ const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || ''
 // Group authorization is by group JID, not by every participant's JID.  The
 // Python adapter still applies group policy and mention rules after intake.
 const GROUP_ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_GROUP_ALLOWED_USERS || '');
+// Under the allowlist policy, a group that is not listed is still admitted when one of these people
+// created it. `sock` is read on each lookup so the gate (and its cache) survives reconnects.
+const groupCreatorGate = createGroupCreatorGate({
+  fetchGroupMetadata: (groupJid) => sock.groupMetadata(groupJid),
+  allowedCreators: parseAllowedUsers(process.env.WHATSAPP_GROUP_ALLOW_CREATORS || ''),
+  allowedMembers: ALLOWED_USERS,
+  sessionDir: SESSION_DIR,
+});
 const DEFAULT_REPLY_PREFIX = '☤ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -585,6 +594,9 @@ async function startSocket() {
     }
   });
 
+  // Someone joined or left: the next message from that group re-reads its member list.
+  sock.ev.on('group-participants.update', (update) => groupCreatorGate.forget(update?.id));
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // In self-chat mode, your own messages commonly arrive as 'append' rather
     // than 'notify'. Accept both and filter agent echo-backs below.
@@ -619,6 +631,7 @@ async function startSocket() {
 
       // Handle fromMe messages based on mode
       let fromOwner = false;
+      let groupCreator = null; // set when a group outside the allowlist was checked by its creator
       if (msg.key.fromMe) {
         if (isGroup || chatId.includes('status')) {
           emitDebugEvent({
@@ -708,7 +721,7 @@ async function startSocket() {
           } catch {}
           continue;
         }
-        const intakeAllowed = isGroup
+        let intakeAllowed = isGroup
           ? matchesInboundWhatsAppGroup({
               chatId,
               groupPolicy: WHATSAPP_GROUP_POLICY,
@@ -717,6 +730,10 @@ async function startSocket() {
             })
           : WHATSAPP_DM_POLICY === 'pairing'
             || matchesAllowedSender(senderId, senderAltId, ALLOWED_USERS, SESSION_DIR);
+        if (!intakeAllowed && isGroup && WHATSAPP_GROUP_POLICY === 'allowlist' && groupCreatorGate.enabled) {
+          groupCreator = await groupCreatorGate.check(chatId, botIds);
+          intakeAllowed = groupCreator.admitted;
+        }
         if (!intakeAllowed) {
           try {
             writeJsonLine({
@@ -725,6 +742,8 @@ async function startSocket() {
               chatId,
               senderId,
               senderAltId,
+              ...(groupCreator ? { groupCreatorIds: groupCreator.creatorIds, groupSubject: groupCreator.subject } : {}),
+              ...(groupCreator?.error ? { groupCreatorLookupError: groupCreator.error } : {}),
             });
           } catch {}
           continue;
@@ -807,6 +826,12 @@ async function startSocket() {
         lookupQuotedMedia: (quotedChatId, quotedMessageId) => quotedMediaCache.get(quotedChatId, quotedMessageId),
       });
       event.fromOwner = fromOwner;
+      if (groupCreator?.admitted) {
+        // The Python adapter re-checks these ids and then limits who may speak to the agent here.
+        event.groupCreatorIds = groupCreator.creatorIds;
+        event.groupMembersAllAllowed = groupCreator.membersAllAllowed;
+        if (groupCreator.subject) event.chatName = groupCreator.subject;
+      }
 
       // Ignore Hermes' own reply messages in self-chat mode to avoid loops.
       if (msg.key.fromMe && ((REPLY_PREFIX && event.body.startsWith(REPLY_PREFIX)) || recentlySentIds.has(msg.key.id))) {

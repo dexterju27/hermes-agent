@@ -387,7 +387,7 @@ def ensure_aiohttp() -> Optional[tuple[str, bool]]:
 # Env vars bridge.js consumes; injected because a multiplexed subprocess's os.environ lacks the secondary profile's .env.
 _BRIDGE_PASSTHROUGH_ENV = (
     "WHATSAPP_ALLOWED_USERS", "WHATSAPP_ALLOW_FROM", "WHATSAPP_DM_POLICY", "WHATSAPP_GROUP_POLICY",
-    "WHATSAPP_GROUP_ALLOWED_USERS", "WHATSAPP_GROUP_ALLOW_FROM", "WHATSAPP_REQUIRE_MENTION",
+    "WHATSAPP_GROUP_ALLOWED_USERS", "WHATSAPP_GROUP_ALLOW_FROM", "WHATSAPP_GROUP_ALLOW_CREATORS", "WHATSAPP_REQUIRE_MENTION",
     "WHATSAPP_MENTION_PATTERNS", "WHATSAPP_FREE_RESPONSE_CHATS", "WHATSAPP_DEBUG",
     "WHATSAPP_FORWARD_OWNER_MESSAGES", "WHATSAPP_MAX_MESSAGE_LENGTH",
     "WHATSAPP_CHUNK_DELAY_MS", "WHATSAPP_SEND_TIMEOUT_MS",
@@ -456,6 +456,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         _, raw_groups = self._select_allowlist(
             extra, ("group_allow_from", "groupAllowFrom"), ("WHATSAPP_GROUP_ALLOW_FROM", "WHATSAPP_GROUP_ALLOWED_USERS"), _wenv)
         self._group_allow_from = self._coerce_allow_list(raw_groups)
+        # People whose newly created groups are admitted without listing each group JID (allowlist policy only).
+        self._group_allow_creators = self._coerce_allow_list(
+            _extra_or_secret(extra, "group_allow_creators", "WHATSAPP_GROUP_ALLOW_CREATORS", ""))
         rr = extra.get("send_read_receipts", False)
         self._send_read_receipts = rr if isinstance(rr, bool) else str(rr or "").strip().lower() in {"1", "true", "yes", "on"}
         self._mention_patterns = self._compile_mention_patterns()
@@ -592,7 +595,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         # ``dm_policy: pairing`` runs under the default profile's allowlist and drops valid pairing DMs.
         bridge_env["WHATSAPP_DM_POLICY"] = self._dm_policy
         bridge_env["WHATSAPP_GROUP_POLICY"] = self._group_policy
-        for env_key, ids in (("WHATSAPP_ALLOWED_USERS", self._allow_from), ("WHATSAPP_GROUP_ALLOWED_USERS", self._group_allow_from)):
+        for env_key, ids in (("WHATSAPP_ALLOWED_USERS", self._allow_from), ("WHATSAPP_GROUP_ALLOWED_USERS", self._group_allow_from),
+                             ("WHATSAPP_GROUP_ALLOW_CREATORS", getattr(self, "_group_allow_creators", None))):
             if ids:
                 bridge_env[env_key] = ",".join(sorted(ids))
             else:
@@ -1349,6 +1353,7 @@ _YAML_BRIDGE = (  # (yaml key, env var, kind) for apply_yaml_bridge
     ("group_policy", "WHATSAPP_GROUP_POLICY", "lower"), ("mention_patterns", "WHATSAPP_MENTION_PATTERNS", "json"),
     ("free_response_chats", "WHATSAPP_FREE_RESPONSE_CHATS", "csv"), ("allow_from", "WHATSAPP_ALLOWED_USERS", "csv"),
     ("group_allow_from", "WHATSAPP_GROUP_ALLOWED_USERS", "csv"),
+    ("group_allow_creators", "WHATSAPP_GROUP_ALLOW_CREATORS", "csv"),
 )
 
 

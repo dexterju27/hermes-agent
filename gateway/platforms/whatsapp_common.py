@@ -244,6 +244,19 @@ class WhatsAppBehaviorMixin(OwnAccessPolicyMixin):
                 cleaned = re.sub(rf"@{re.escape(bare_id)}\b[,:\-]*\s*", "", cleaned)
         return cleaned.strip() or text
 
+    def _creator_group_admits(self, data: dict[str, Any]) -> bool:
+        """A group outside ``group_allow_from`` whose creator is in ``group_allow_creators`` (allowlist
+        policy only). The bridge reports the creator; it is re-checked here. Such a group can hold anyone
+        the creator adds later, so only senders on the DM allowlist are answered in it."""
+        creators = getattr(self, "_group_allow_creators", None)
+        if self._group_policy != "allowlist" or not creators or "*" in creators:
+            return False
+        reported = [str(c) for c in (data.get("groupCreatorIds") or []) if str(c).strip()]
+        if not any(self._matches_whatsapp_allowlist(creator, creators) for creator in reported):
+            return False
+        sender = str(data.get("senderId") or data.get("from") or "")
+        return bool(sender) and self._entry_matches(self._live_dm_allow_from(), sender)
+
     def _should_process_message(self, data: dict[str, Any]) -> bool:
         chat_id = str(data.get("chatId") or "")
         # Broadcast pseudo-chats are filtered even in self-chat mode (fromMe events).
@@ -252,8 +265,12 @@ class WhatsAppBehaviorMixin(OwnAccessPolicyMixin):
         if not data.get("isGroup", False):
             # DMs that pass the policy gate are always processed
             return self._is_dm_intake_allowed(str(data.get("senderId") or data.get("from") or ""))
-        if not self._is_group_allowed(chat_id):
+        listed = self._is_group_allowed(chat_id)
+        if not listed and not self._creator_group_admits(data):
             return False
+        # A creator-admitted group holding only allowed users is a private chat: answer without a mention.
+        if not listed and data.get("groupMembersAllAllowed") is True:
+            return True
         # Group messages: check mention / free-response settings
         if chat_id in self._whatsapp_free_response_chats() or not self._whatsapp_require_mention():
             return True

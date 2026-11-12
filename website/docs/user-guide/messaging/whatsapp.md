@@ -220,6 +220,13 @@ needs the participant paired or `WHATSAPP_ALLOW_ALL_USERS=true`. By default the 
 message; set `require_mention: true` / `WHATSAPP_REQUIRE_MENTION=true` to answer only @mentions, replies to the
 bot, or `/commands` (groups in `free_response_chats` are exempt).
 
+**Groups you create.** Under `allowlist`, `whatsapp.group_allow_creators` / `WHATSAPP_GROUP_ALLOW_CREATORS`
+(comma-separated phone numbers or LIDs) also admits any group that one of those people created, without listing
+its JID: create a group, add the bot, and it answers. Only senders on the DM allowlist are answered in such a
+group, because the creator can add anyone later. While every member is an allowed user the bot answers every
+message; once someone else joins, the mention rule applies (`require_mention` / `mention_patterns`). `*` is not
+accepted here; use `group_policy: open` to admit every group.
+
 Then start the gateway:
 
 ```bash

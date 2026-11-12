@@ -218,7 +218,7 @@ _SHARED_KEYS: tuple = (
     ("observe_unmentioned_group_messages", _TELEGRAM, None),
     *_plain(
         "dm_policy", "allow_from", "allow_admin_from", "user_allowed_commands",
-        "group_policy", "group_allow_from", "group_allow_admin_from", "group_user_allowed_commands",
+        "group_policy", "group_allow_from", "group_allow_creators", "group_allow_admin_from", "group_user_allowed_commands",
     ),
     ("channel_skill_bindings", _DISCORD_SLACK, None),
     ("channel_prompts", None, _str_keyed),
