@@ -20,7 +20,7 @@ from plugins.web.firecrawl.provider import _is_tool_gateway_ready, check_firecra
 from tools.debug_helpers import DebugSession
 from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_exists
 from tools.url_safety import async_is_safe_url
-from tools.web_tools_rescue import _managed_search_fallback, _rescue_eligible, _rescue_search
+from tools.web_tools_rescue import _last_resort_search, _managed_search_fallback, _rescue_eligible, _rescue_search
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
     _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
@@ -375,7 +375,11 @@ def _memoized_search(provider, query: str, limit: int) -> dict:
         fallback = _managed_search_fallback(provider, error, query, fetch_limit)
         if fallback is not None:
             return fallback
-        return _rescue_search(provider.name, error, query, fetch_limit) if _rescue_eligible(provider) else None
+        rescued = _rescue_search(provider.name, error, query, fetch_limit) if _rescue_eligible(provider) else None
+        if rescued is None or not rescued.get("success"):
+            # Backend and keyless ring both failed: web.last_resort_search, when configured, gets the final try.
+            return _last_resort_search(error, query, fetch_limit) or rescued
+        return rescued
 
     response_data = search_memo.lookup(provider.name, query, limit)
     if response_data is None:

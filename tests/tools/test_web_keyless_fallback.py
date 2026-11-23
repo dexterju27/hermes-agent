@@ -13,6 +13,7 @@ import json
 from unittest.mock import patch
 
 import pytest
+from types import SimpleNamespace
 
 from tools import web_tools
 from agent import web_search_registry as registry
@@ -710,3 +711,90 @@ class TestKeylessFailover:
         out = keyless_mcp.extract_with_failover("exa", ["https://a", "https://b"])
         assert out == partial
         assert not called
+
+
+class TestExaFreeFirst:
+    """``web.exa_free_first``: anonymous endpoint first, the paid key only when it gives nothing."""
+
+    ROWS = {"success": True, "data": {"web": [{"url": "https://example.com", "title": "t", "description": "d", "position": 1}]}}
+
+    @staticmethod
+    def _keyed(monkeypatch, free_first):
+        from plugins.web.exa import provider as exa_provider
+        monkeypatch.setattr("agent.web_search_provider.get_provider_env", lambda name: "sk-real" if name == "EXA_API_KEY" else "")
+        monkeypatch.setattr(keyless_mcp, "provider_tier", lambda name: "auto")
+        monkeypatch.setattr(exa_provider, "_free_first", lambda: free_first)
+        return exa_provider
+
+    def test_free_endpoint_serves_and_key_is_not_spent(self, monkeypatch):
+        exa_provider = self._keyed(monkeypatch, True)
+        with patch.object(keyless_mcp, "exa_search_keyless", return_value=self.ROWS) as free, \
+                patch.object(exa_provider, "_get_exa_client") as keyed:
+            out = ExaWebSearchProvider().search("q")
+        free.assert_called_once()
+        keyed.assert_not_called()
+        assert out["data"]["web"][0]["url"] == "https://example.com"
+
+    @pytest.mark.parametrize("free_result", [
+        {"success": False, "error": "Exa free tier: rate limit exceeded (429)"},
+        {"success": True, "data": {"web": []}},
+    ])
+    def test_limited_or_empty_free_endpoint_falls_to_the_key(self, monkeypatch, free_result):
+        exa_provider = self._keyed(monkeypatch, True)
+        hit = SimpleNamespace(url="https://paid.example", title="paid", highlights=["h"])
+        with patch.object(keyless_mcp, "exa_search_keyless", return_value=free_result), \
+                patch.object(exa_provider, "_get_exa_client") as keyed:
+            keyed.return_value.search.return_value = SimpleNamespace(results=[hit])
+            out = ExaWebSearchProvider().search("q")
+        keyed.return_value.search.assert_called_once()
+        assert out["data"]["web"][0]["url"] == "https://paid.example"
+
+    def test_off_by_default_goes_straight_to_the_key(self, monkeypatch):
+        exa_provider = self._keyed(monkeypatch, False)
+        with patch.object(keyless_mcp, "exa_search_keyless") as free, patch.object(exa_provider, "_get_exa_client") as keyed:
+            keyed.return_value.search.return_value = SimpleNamespace(results=[])
+            ExaWebSearchProvider().search("q")
+        free.assert_not_called()
+        keyed.return_value.search.assert_called_once()
+
+
+class TestLastResortSearch:
+    """``web.last_resort_search``: hosted model search after the backend and the keyless ring both fail."""
+
+    def test_bullets_become_rows_with_clean_urls(self):
+        from tools.web_tools_rescue import _bullets_to_rows
+        text = "- Open 10:00 to midnight. https://a.example/hours?utm_source=openai\nno link here\n- Second fact (https://b.example/x)."
+        rows = _bullets_to_rows(text, 5)
+        assert [r["url"] for r in rows] == ["https://a.example/hours", "https://b.example/x"]
+        assert rows[0]["description"].startswith("Open 10:00") and rows[1]["position"] == 2
+
+    def test_off_when_not_configured(self, monkeypatch):
+        from tools import web_tools_rescue
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        assert web_tools_rescue._last_resort_search("boom", "q", 5) is None
+
+    def test_serves_rows_from_the_hosted_endpoint(self, monkeypatch):
+        from tools import web_tools_rescue
+        cfg = {"last_resort_search": {"url": "http://relay/v1/responses", "model": "m", "key_env": "K"}}
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: cfg)
+        monkeypatch.setattr("agent.web_search_provider.get_provider_env", lambda name: "secret")
+        events = ['data: ' + json.dumps({"type": "response.output_text.delta", "delta": "- Fact one. https://a.example/p\n"}), "data: [DONE]"]
+
+        class _Resp:
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def raise_for_status(self): pass
+            def iter_lines(self, decode_unicode=False): return iter(events)
+
+        with patch("requests.post", return_value=_Resp()) as post:
+            out = web_tools_rescue._last_resort_search("exa down", "q", 5)
+        assert post.call_args.kwargs["headers"] == {"Authorization": "Bearer secret"}
+        assert out["success"] and out["data"]["web"][0]["url"] == "https://a.example/p"
+        assert out["data"]["rescued_from"] == "last_resort_search"
+
+    def test_endpoint_failure_returns_none(self, monkeypatch):
+        from tools import web_tools_rescue
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"last_resort_search": {"url": "http://relay", "model": "m"}})
+        monkeypatch.setattr("agent.web_search_provider.get_provider_env", lambda name: "")
+        with patch("requests.post", side_effect=RuntimeError("down")):
+            assert web_tools_rescue._last_resort_search("exa down", "q", 5) is None

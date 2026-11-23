@@ -396,6 +396,14 @@ DEFAULT_CONFIG = {
         # key; "paid" = always keyed (missing key = error; vendor excluded from the ring); unset =
         # keyed when the key is present, else the ring.
         "provider_tier": {},
+        # Exa only, with EXA_API_KEY set: web_search asks Exa's anonymous endpoint first and uses the key
+        # only when that is rate limited, errors, or returns nothing. A keyed failure still gets the
+        # one-shot keyless rescue above. web_extract is unchanged.
+        "exa_free_first": False,
+        # Final try for a web_search that the backend AND the keyless ring both failed: an OpenAI-Responses
+        # endpoint with hosted web search, e.g. {"url": "http://127.0.0.1:4001/v1/responses", "model": "...",
+        # "key_env": "SOME_KEY"}. A model searches and writes, so it is slower than a search API. {} = off.
+        "last_resort_search": {},
         # TTL caching for web_search + web_extract: repeat searches (same query + provider) within
         # the TTL come from an in-process memo; repeat extracts from the cache/web store. Concurrent
         # identical searches coalesce into one vendor request. Only successes cached.

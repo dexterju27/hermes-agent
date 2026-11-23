@@ -118,6 +118,66 @@ def _rescue_search(provider_name: str, original_error: str, query: str, limit: i
     }
 
 
+def _last_resort_config() -> dict:
+    """``web.last_resort_search``: ``{url, model, key_env}`` of an OpenAI-Responses endpoint with hosted web search; ``{}`` = off."""
+    from tools.web_tools import _load_web_config
+    cfg = _load_web_config().get("last_resort_search") or {}
+    return cfg if isinstance(cfg, dict) and cfg.get("url") and cfg.get("model") else {}
+
+
+def _bullets_to_rows(text: str, limit: int) -> list:
+    """One row per answer line that carries a URL: the line is the description, its last URL the link."""
+    import re
+    rows = []
+    for line in (ln.strip(" -*\t") for ln in text.splitlines()):
+        urls = re.findall(r"https?://[^\s)\]>]+", line)
+        if urls:
+            url = urls[-1].rstrip(".,;").replace("?utm_source=openai", "").replace("&utm_source=openai", "")
+            rows.append({"url": url, "title": url.split("/")[2], "description": line[:1500], "position": len(rows) + 1})
+        if limit and len(rows) >= limit:
+            break
+    return rows
+
+
+def _last_resort_search(original_error: str, query: str, limit: int):
+    """Hosted model search for a call the backend and the keyless ring both failed; None when off or it fails too.
+
+    Slower than a search API (a model searches and writes), so it runs only after everything else."""
+    cfg = _last_resort_config()
+    if not cfg:
+        return None
+    import json
+    import requests
+    from agent.web_search_provider import get_provider_env
+    logger.warning("web_search failed everywhere (%s); last-resort hosted search", (original_error or "")[:200])
+    body = {
+        "model": cfg["model"], "stream": True, "store": False, "reasoning": {"effort": "low"},
+        "tools": [{"type": "web_search"}], "tool_choice": {"type": "web_search"},
+        "input": ("Search the web for the following and report what the sources say. Reply with facts only, as short "
+                  "bullets, one fact per line, each line ending with its source URL. No introduction, no summary.\n\n" + query),
+    }
+    try:
+        key = get_provider_env(str(cfg.get("key_env") or ""))
+        with requests.post(cfg["url"], json=body, headers={"Authorization": f"Bearer {key}"}, stream=True, timeout=int(cfg.get("timeout", 120))) as resp:
+            resp.raise_for_status()
+            parts = []
+            for raw in resp.iter_lines(decode_unicode=True):
+                if raw and raw.startswith("data:") and raw.strip() != "data: [DONE]":
+                    event = json.loads(raw[5:])
+                    if event.get("type") == "response.output_text.delta":
+                        parts.append(event.get("delta", ""))
+        rows = _bullets_to_rows("".join(parts), limit)
+    except Exception as exc:
+        logger.warning("last-resort hosted search failed too: %s", str(exc)[:200])
+        return None
+    if not rows:
+        return None
+    return {"success": True, "data": {
+        "web": rows, "rescued_from": "last_resort_search",
+        "backend_error": f"Search backends failed this call ({(original_error or 'unknown error')[:300]}); result served by the hosted last-resort search.",
+    }}
+
+
 def _policy_blocked_result(result: dict) -> bool:
     """True for a website-policy refusal — intentional, never rescued (it would fetch blocked content)."""
     error = str(result.get("error") or "").lower()

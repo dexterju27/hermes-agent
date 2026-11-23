@@ -29,6 +29,26 @@ def _get_exa_client() -> Any:
     return cached_sdk_client("_exa_client", "EXA_API_KEY", _MISSING_KEY, "exa", _factory)
 
 
+def _free_first() -> bool:
+    """``web.exa_free_first``: with a key set, ask Exa's anonymous endpoint first and spend the key only when it fails."""
+    from tools.web_tools import _load_web_config
+    return bool(_load_web_config().get("exa_free_first", False))
+
+
+def _free_search(query: str, limit: int) -> Any:
+    """Rows from the anonymous endpoint, or None when it is rate limited, errors, or finds nothing."""
+    from plugins.web import keyless_mcp
+    try:
+        result = keyless_mcp.exa_search_keyless(query, limit)
+    except Exception as exc:  # the free attempt must never cost the caller the paid one
+        result = {"success": False, "error": str(exc)}
+    if result.get("success") and (result.get("data") or {}).get("web"):
+        logger.info("Exa search served by the free endpoint: '%s' (limit=%d)", query, limit)
+        return result
+    logger.info("Exa free endpoint gave nothing (%s); using the paid key", str(result.get("error") or "no results")[:200])
+    return None
+
+
 def _crawl_status(error: Any) -> Any:
     """The origin status of a failed ``statuses[]`` entry: ``http_status_code``, else the one its tag names."""
     return getattr(error, "http_status_code", None) or exa_crawl_status(getattr(error, "tag", None))
@@ -47,6 +67,8 @@ class ExaWebSearchProvider(BaseWebSearchProvider):
         def _body() -> dict[str, Any]:
             if use_keyless("exa", provider_env("EXA_API_KEY")):
                 return keyless_search("Exa", "exa", query, limit, logger)
+            if _free_first() and (free := _free_search(query, limit)):
+                return free
             logger.info("Exa search: '%s' (limit=%d)", query, limit)
             response = _get_exa_client().search(query, num_results=limit, contents={"highlights": True})
             return search_ok([
