@@ -1222,8 +1222,22 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         user_id=env("HERMES_SESSION_USER_ID", "") or None,
         user_id_alt=env("HERMES_SESSION_USER_ID_ALT", "") or None,
         notifier_profile=notifier_profile,
-        delivery_mode="notify+wake" if platform != "tui" else None,
+        delivery_mode=_auto_subscribe_delivery_mode() if platform != "tui" else None,
         delivery_metadata=delivery_metadata or None)
+
+
+def _auto_subscribe_delivery_mode() -> str:
+    """Delivery mode for auto-subscriptions from gateway chats: ``kanban.auto_subscribe_delivery_mode``.
+
+    ``notify+wake`` (default) sends the raw status ping to the chat and wakes the agent. ``wake``
+    only wakes it, so the agent's own reply is the single message the person sees. Anything
+    unknown or unreadable keeps the default."""
+    from hermes_cli.kanban_db_notify import _NOTIFY_DELIVERY_MODES
+    try:
+        mode = cfg_get(load_config(), "kanban", "auto_subscribe_delivery_mode", default="notify+wake")
+    except Exception:
+        return "notify+wake"
+    return mode if mode in _NOTIFY_DELIVERY_MODES else "notify+wake"
 
 
 def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:

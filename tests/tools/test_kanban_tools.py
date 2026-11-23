@@ -1293,6 +1293,36 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     assert _list_subs_for_task(d["task_id"]) == []
 
 
+def _auto_subscribed_mode(monkeypatch, tmp_path, config_text):
+    home = tmp_path / "mode-home" / ".hermes"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(config_text)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "channel-1")
+
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_create({"title": "mode", "assignee": "peer"}))
+    assert d["ok"] is True and d["subscribed"] is True, d
+    (sub,) = _list_subs_for_task(d["task_id"])
+    return sub["delivery_mode"]
+
+
+def test_auto_subscribe_delivery_mode_defaults_to_notify_and_wake(monkeypatch, worker_env, tmp_path):
+    assert _auto_subscribed_mode(monkeypatch, tmp_path, "kanban: {}\n") == "notify+wake"
+
+
+def test_auto_subscribe_delivery_mode_wake_only(monkeypatch, worker_env, tmp_path):
+    """``wake`` keeps the raw status ping out of the chat; the woken agent's reply is the delivery."""
+    config = "kanban:\n  auto_subscribe_delivery_mode: wake\n"
+    assert _auto_subscribed_mode(monkeypatch, tmp_path, config) == "wake"
+
+
+def test_auto_subscribe_delivery_mode_unknown_value_keeps_default(monkeypatch, worker_env, tmp_path):
+    config = "kanban:\n  auto_subscribe_delivery_mode: shout\n"
+    assert _auto_subscribed_mode(monkeypatch, tmp_path, config) == "notify+wake"
+
+
 def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worker_env):
     """If add_notify_sub itself raises (e.g. DB locked, schema drift),
     _maybe_auto_subscribe must NOT bubble that up and fail the parent
