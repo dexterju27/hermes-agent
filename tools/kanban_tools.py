@@ -308,14 +308,39 @@ def _require_orchestrator_tool(tool_name: str) -> None:
             "kanban_heartbeat, or kanban_comment for their assigned task.")
 
 
+def _profile_board(board: Optional[str]) -> Optional[str]:
+    """The board a model tool call may use, after this profile's ``kanban.board`` setting.
+
+    ``kanban.board`` names the board this profile's chat sessions work on; without it nothing
+    changes. With ``kanban.lock_board`` also true, a call naming any other board is refused, so
+    two people who share one install (one profile each) cannot read each other's tasks.
+    Dispatcher-spawned workers are not affected: they are already pinned to their task's board.
+    """
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return board
+    from hermes_cli import kanban_db as kb
+    config = load_config()
+    try:
+        home = kb._normalize_board_slug(cfg_get(config, "kanban", "board", default=""))
+        asked = kb._normalize_board_slug(board)
+    except ValueError as exc:
+        raise _Reject(str(exc))
+    if not home:
+        return board
+    if asked and asked != home and cfg_get(config, "kanban", "lock_board", default=False):
+        raise _Reject(f"this profile works on board {home!r} only; board {asked!r} is not available here.")
+    return asked or home
+
+
 @contextmanager
 def _board(board: Optional[str], *, quiet_close: bool = False):
     """``with _board(slug) as (kb, conn)``; lazy import so the module loads in non-kanban
-    contexts. ``board=None`` keeps the env/symlink resolution chain; an explicit slug
-    overrides it per call. ``quiet_close`` swallows close() errors (best-effort bridges)."""
+    contexts. ``board=None`` keeps the env/symlink resolution chain (or this profile's
+    ``kanban.board``); an explicit slug overrides it per call unless ``kanban.lock_board``
+    forbids it. ``quiet_close`` swallows close() errors (best-effort bridges)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
-    conn = kbc.connect(board=board)
+    conn = kbc.connect(board=_profile_board(board))
     try:
         yield kb, conn
     finally:
@@ -976,6 +1001,7 @@ def _handle_comment(args: dict, **kw) -> str:
 def _store_attachment(board, tid, filename, data, content_type) -> str:
     """Store via ``kanban_db.store_attachment_bytes`` (shared size cap, per-task
     dir, metadata row) so agent, dashboard, and CLI surfaces stay in lockstep."""
+    board = _profile_board(board)
     with _board(board) as (kb, conn):
         att_id = kb.store_attachment_bytes(
             conn, tid, str(filename), data,
@@ -1140,7 +1166,7 @@ def _handle_create(args: dict, **kw) -> str:
             workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
             # Board-project inheritance must read the board this call opened, not the
             # session's current board.
-            board=args.get("board"),
+            board=_profile_board(args.get("board")),
             project_source_task_id=project_source_task_id, triage=triage,
             creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),

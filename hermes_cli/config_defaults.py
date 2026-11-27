@@ -1908,6 +1908,12 @@ DEFAULT_CONFIG = {
         # Assignee when the orchestrator can't match one to an installed profile; "" = default
         # profile. A task never ends up with assignee=None.
         "default_assignee": "",
+        # Board this profile's chat sessions use for kanban tools; "" = the install's current board.
+        # With lock_board true, a tool call that names any other board is refused, so profiles that
+        # belong to different people cannot read each other's tasks. Workers ignore both keys: the
+        # dispatcher already pins a worker to its task's board.
+        "board": "",
+        "lock_board": False,
         # Global cap: positive int = the HOST never has more than N tasks 'running' across all
         # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
         # MemTotal is unreadable (macOS/Windows) None means no cap.

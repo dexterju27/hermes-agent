@@ -140,6 +140,11 @@ They also coexist inside one run. A kanban task executes in an isolated managed 
 
 ## Boards (multi-project)
 
+> **One board per person.** When two people share one install (one profile each), set
+> `kanban.board: <slug>` and `kanban.lock_board: true` in each person's chat profile. Kanban tool
+> calls from that profile then use that board, and a call that names any other board is refused.
+> Workers are unaffected: the dispatcher already pins a worker to its task's board.
+
 Boards let you separate unrelated streams of work — one per project, repo,
 or domain — into isolated queues. A new install has exactly one board
 called `default` (DB at `~/.hermes/kanban.db` for back-compat). Users who
