@@ -717,3 +717,14 @@ def test_turn_that_crosses_the_trigger_splices_the_summary_prepared_during_its_t
     assert len([m for m in result["messages"] if m.get(COMPRESSED_SUMMARY_METADATA_KEY)]) == 1
     assert pass_during_tool == [prepare_ahead, False]
     assert summaries == [prepare_ahead], "one summariser call: on the worker with the flag, inline without"
+
+
+def test_a_wider_band_starts_the_pass_earlier():
+    """``compression.prepare_ahead_band``: at 60% of the trigger the default band waits, a 0.5 band starts."""
+    cc = _compressor()
+    cc.last_prompt_tokens = int(cc.threshold_tokens * 0.6)
+    agent = SimpleNamespace(compression_enabled=True)
+    assert cc.prepared_compaction._blocked(agent, cc, "cli") is True
+    cc.prepared_compaction = PreparedCompaction(0.5)
+    assert cc.prepared_compaction._blocked(agent, cc, "cli") is False
+    assert PreparedCompaction(7).band_ratio == pc.PREPARE_BAND_RATIO  # out of range keeps the default

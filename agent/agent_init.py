@@ -1447,6 +1447,18 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     )
 
 
+def _prepare_ahead_band(agent) -> float:
+    """``compression.prepare_ahead_band``: how far below the trigger (as a fraction of it) the
+    background summary may start. Missing or invalid keeps the built-in band."""
+    from agent.prepared_compaction import PREPARE_BAND_RATIO
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        value = float(cfg_get(load_config(), "compression", "prepare_ahead_band", default=PREPARE_BAND_RATIO))
+    except Exception:
+        return PREPARE_BAND_RATIO
+    return value if 0 < value < 1 else PREPARE_BAND_RATIO
+
+
 def _warn_invalid_config_int(
     what: str, value: Any, requirement: str, fallback: str, print_fallback: str = "",
     agent: Any = None,
@@ -1886,7 +1898,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             setattr(_cc, _attr, _value)
     if cs.prepare_ahead and isinstance(_cc, ContextCompressor):
         from agent.prepared_compaction import PreparedCompaction
-        _cc.prepared_compaction = PreparedCompaction()
+        _cc.prepared_compaction = PreparedCompaction(_prepare_ahead_band(agent))
     agent.compression_checkpoint_required = cs.checkpoint_required
     from agent.conversation_compression_checkpoint import _warn_checkpoint_required_without_capable_provider
     _warn_checkpoint_required_without_capable_provider(agent)

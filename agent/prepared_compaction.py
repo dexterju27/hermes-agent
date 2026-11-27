@@ -225,7 +225,10 @@ def _blocked_for_platform(agent: Any, origin: str) -> bool:
 class PreparedCompaction:
     """Prepared-summary state owned by one ``ContextCompressor``."""
 
-    def __init__(self) -> None:
+    def __init__(self, band_ratio: float = PREPARE_BAND_RATIO) -> None:
+        # Fraction of the trigger below which a pass may start (``compression.prepare_ahead_band``).
+        # A wider band starts the summary earlier, so it is finished before the trigger is reached.
+        self.band_ratio = band_ratio if 0 < band_ratio < 1 else PREPARE_BAND_RATIO
         self._lock = threading.Lock()
         self._entry: Optional[PreparedSummary] = None
         self._pending: Optional[_PendingPass] = None  # the one pass allowed to publish
@@ -386,7 +389,7 @@ class PreparedCompaction:
         if compressor.awaiting_real_usage_after_compression or compressor._fallback_compression_streak >= 2:
             return True  # no real usage yet, or the summary model is benched after repeated fallbacks
         tokens = compressor.last_prompt_tokens
-        band_floor = int(compressor.threshold_tokens * (1 - PREPARE_BAND_RATIO))
+        band_floor = int(compressor.threshold_tokens * (1 - self.band_ratio))
         if tokens <= 0 or compressor.threshold_tokens <= 0 or tokens < band_floor:
             return True
         now = time.monotonic()
