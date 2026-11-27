@@ -1879,6 +1879,8 @@ DEFAULT_CONFIG = {
         # status ping and wakes the agent; "wake" only wakes it (the agent's reply is the one
         # message the person sees); "notify" only sends the ping.
         "auto_subscribe_delivery_mode": "notify+wake",
+        # Characters of a completed run's summary carried in the wake message (0 = first line only).
+        "wake_summary_chars": 0,
         # Poll and deliver Kanban subscriptions from this gateway. Disable on profiles that do
         # not own notification subscriptions to avoid an idle five-second board probe.
         "notify_in_gateway": True,

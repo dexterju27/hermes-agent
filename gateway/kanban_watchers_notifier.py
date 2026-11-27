@@ -398,7 +398,23 @@ def _fmt_completed(ev, n) -> tuple:
     elif n.task and n.task.result:
         wake_handoff = _first_line(n.task.result, 160)
     handoff = f"\n{wake_handoff}" if wake_handoff is not None else ""
-    return t("gateway.kanban.ping.completed", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
+    ping = t("gateway.kanban.ping.completed", head=n.head, title=n.title, handoff=handoff)
+    # The chat ping stays one line; the woken agent can get the whole summary, so it answers
+    # from the wake message instead of calling kanban_show (whose result stays in its context).
+    limit = _wake_summary_chars()
+    if payload_summary and limit:
+        wake_handoff = str(payload_summary).strip()[:limit]
+    return ping, wake_handoff, None
+
+
+def _wake_summary_chars() -> int:
+    """``kanban.wake_summary_chars``: how much of a completed run's summary the wake message
+    carries. 0 (default) keeps the first line only."""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        return max(0, int(cfg_get(load_config(), "kanban", "wake_summary_chars", default=0) or 0))
+    except Exception:
+        return 0
 
 
 def _fmt_review_requested(ev, n) -> tuple:
