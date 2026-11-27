@@ -19,6 +19,7 @@ from agent.i18n import t
 
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
 from gateway.wake import session_owned_by_profile
+from gateway.kanban_delivery_contract import delivery_contract, suppress_no_change, wake_guidance
 
 
 def _kbc():
@@ -402,8 +403,9 @@ def _fmt_completed(ev, n) -> tuple:
     # The chat ping stays one line; the woken agent can get the whole summary, so it answers
     # from the wake message instead of calling kanban_show (whose result stays in its context).
     limit = _wake_summary_chars()
-    if payload_summary and limit:
-        wake_handoff = str(payload_summary).strip()[:limit]
+    summary = payload_summary or (n.task.result if n.task else None)
+    if summary and limit:
+        wake_handoff = str(summary).strip()[:limit]
     return ping, wake_handoff, None
 
 
@@ -531,6 +533,8 @@ class _KanbanNotification:
         # The wake self-post path needs the key even when every event was skipped.
         self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
         mode = sub.get("delivery_mode") or "notify"
+        self.contract = delivery_contract(task)
+        self.d = {**d, "events": [ev for ev in d["events"] if not suppress_no_change(task, ev, mode)]}
         self.wake_agent = mode in ("notify+wake", "wake")
         self.send_passive = mode != "wake"
         # Worker handoff carried into the synthetic wake turn so the woken
@@ -540,6 +544,10 @@ class _KanbanNotification:
         self.adapter: Any = None
         self.is_push_adapter = True
         self.wake_kinds: set = set()
+
+    def is_diagnostic(self, ev: Any) -> bool:
+        # A promised task result/failure is not an optional infrastructure warning.
+        return not self.contract and diagnostic_event(ev)
 
     # -- cursor / subscription ops (blocking, run in a fresh-context thread) --
 
@@ -581,6 +589,10 @@ class _KanbanNotification:
         if formatter is None:
             return None
         msg, handoff, review_detail = formatter(ev, self)
+        if self.contract and ev.kind in {"timed_out", "crashed", "gave_up"}:
+            partial_result = _payload(ev, "partial_result")
+            if partial_result:
+                handoff = "Partial result (unverified; task did not complete): " + _safe_review_reason(partial_result, 3000)
         if handoff is not None:
             self.wake_handoff = handoff
         if review_detail is not None:
@@ -591,7 +603,7 @@ class _KanbanNotification:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
         self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
-        self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
+        self.wake_diagnostic = all(self.is_diagnostic(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
         if not self.wake_kinds:
             return
         if self.is_push_adapter:
@@ -615,7 +627,18 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        if self.contract:
+            # Wake-only handoffs have no passive failure ping; carry a bounded,
+            # redacted reason instead of forcing a fresh task-detail lookup.
+            reasons = [_safe_review_reason(_payload(ev, "reason") or _payload(ev, "error"), 400)
+                       for ev in self.d["events"] if diagnostic_event(ev)]
+            reasons = list(dict.fromkeys(reason for reason in reasons if reason))
+            if reasons:
+                synth += "\nFailure detail: " + "; ".join(reasons)[:800]
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
+        guidance = wake_guidance(task)
+        if guidance:
+            self.synth += "\n\n" + guidance
 
     def _log_woke(self) -> None:
         logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
@@ -656,6 +679,7 @@ class _KanbanNotification:
             async with self._owner_scope():
                 await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key,
                                    profile=self._served_wake_profile(),
+                                   delivery_id=self.wake_delivery_id,
                                    notification_category="diagnostic" if self.wake_diagnostic else "result")
             self._log_woke()
             return
@@ -685,6 +709,7 @@ class _KanbanNotification:
                 raise RuntimeError(f"Kanban wake profile {self.sub_profile!r} no longer exists")
         async with _async_profile_runtime_scope(self.runner._resolve_profile_home_for_source(_source)):
             await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source,
+                               delivery_id=self.wake_delivery_id,
                                notification_category="diagnostic" if self.wake_diagnostic else "result")
         self._log_woke()
 
@@ -700,7 +725,7 @@ class _KanbanNotification:
         async def send_ping():
             nonlocal _send_res
             _send_res = await adapter.send(sub["chat_id"], msg, metadata=metadata)
-        if not await present_notification(send_ping, platform=self.platform_str, diagnostic=diagnostic_event(ev)):
+        if not await present_notification(send_ping, platform=self.platform_str, diagnostic=self.is_diagnostic(ev)):
             return False
         # SendResult(success=False) without an exception is a FAILED delivery
         # (else the event is lost); None / non-SendResult keeps the
@@ -791,8 +816,8 @@ class _KanbanNotification:
             from gateway.warning_notifications import warning_notifications_enabled
             split = not warning_notifications_enabled(self.platform_str)
             wake_groups = ([original_events] if not split else [
-                [ev for ev in original_events if diagnostic_event(ev)],
-                [ev for ev in original_events if not diagnostic_event(ev)],
+                [ev for ev in original_events if self.is_diagnostic(ev)],
+                [ev for ev in original_events if not self.is_diagnostic(ev)],
             ])
             wake_payloads = []
             for events in wake_groups:
@@ -804,7 +829,8 @@ class _KanbanNotification:
                     self.format_event(ev)
                 self.build_wake_text()
                 if self.wake_kinds:
-                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds))
+                    identity = f"kanban:{self.board_slug}:{self.task_id}:" + ",".join(str(ev.id) for ev in events)
+                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds, identity))
             self.d = {**self.d, "events": original_events}
         is_push = self.is_push_adapter
         from gateway.wake import WakeNotAccepted
@@ -812,7 +838,7 @@ class _KanbanNotification:
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
             try:
-                for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
+                for self.synth, self.wake_diagnostic, self.wake_kinds, self.wake_delivery_id in wake_payloads:
                     await self.wake()
                 self.clear_failures()
             except WakeNotAccepted:

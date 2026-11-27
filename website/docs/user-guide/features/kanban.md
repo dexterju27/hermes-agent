@@ -1006,6 +1006,21 @@ All commands are also available as a slash command in the interactive CLI and in
 
 `--max-retries` is a per-task circuit-breaker override for the dispatcher. `--max-retries 1` blocks the task on the first non-successful attempt, while `--max-retries 3` allows two retries and blocks on the third failure. Omit it to use `kanban.failure_limit` from `config.yaml`, then the built-in default.
 
+The model-facing `kanban_create` tool accepts the same `max_retries` override alongside
+`max_runtime_seconds`. Use a per-task cap and `max_retries: 1` for a short task that should
+return partial findings rather than start over after a timeout. Do not apply a short-task
+cap to long builds, research or monitoring indiscriminately. Timeout and ordinary crash
+accounting honor the dispatcher's configured limit when no task override is present.
+
+Before a risky or slow step, a worker can save a compact progress checkpoint with
+`kanban_heartbeat(note="CHECKPOINT: <partial result; evidence references; remaining work>")`.
+If that attempt times out or crashes, the most recent explicit checkpoint from its own
+run is carried in the failure event and closed-run summary, bounded to 4,000 characters.
+The retry worker sees it in prior attempts; a notifier can deliver it without asking a
+model to re-read the full log. Ordinary liveness notes do not replace checkpoints.
+This is **partial, unverified progress**, not a successful completion or permission to
+repeat an external action. No checkpoint is invented if the worker did not save one.
+
 ### Concurrency, scheduling, and child promotion config
 
 | Config key | Default | What it does |

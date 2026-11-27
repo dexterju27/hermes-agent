@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -384,10 +385,15 @@ def claim_unseen_events_for_sub(
     row's ``last_event_id`` has already been advanced inside ``BEGIN IMMEDIATE``,
     so concurrent gateway watchers on the same board DB serialize on SQLite's
     writer lock and only the first claims a given event range. Callers send the
-    events, then leave the cursor or call :func:`rewind_notify_cursor` on
-    delivery failure.
+    events, then ACK with :func:`advance_notify_cursor` or rewind on failure.
+    The original cursor and process incarnation persist beside the reservation:
+    a gateway that dies before delivery cannot silently consume the events.
     """
     with _kb.write_txn(conn):
+        key = _sub_key(task_id, platform, chat_id, thread_id)
+        if not _recover_dead_notify_claim(conn, key):
+            cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id) or 0
+            return cursor, cursor, []
         old_cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
         if old_cursor is None:
             return 0, 0, []
@@ -397,8 +403,46 @@ def claim_unseen_events_for_sub(
         )
         if not events:
             return old_cursor, old_cursor, []
-        _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), new_cursor, old_cursor)
+        conn.execute(
+            "UPDATE kanban_notify_subs SET notify_claim_owner=?, notify_claim_old_cursor=? " + _SUB_KEY_WHERE,
+            (_notify_owner(), old_cursor, *key),
+        )
+        _cas_cursor(conn, key, new_cursor, old_cursor)
         return old_cursor, new_cursor, events
+
+
+def _notify_owner() -> str:
+    from hermes_cli.kanban_db_dispatch import _process_fingerprint
+    return json.dumps([_kb._claimer_id(), _process_fingerprint(os.getpid())])
+
+
+def _notify_owner_alive(owner: str) -> bool:
+    from hermes_cli.kanban_db_dispatch import _worker_alive
+    try:
+        claimer, started_at = json.loads(owner)
+        host, pid = claimer.rsplit(":", 1)
+        # This SQLite board's local process identity cannot prove a remote owner
+        # dead. Fail closed rather than duplicate a live remote delivery.
+        if host != _kb._claimer_id().rsplit(":", 1)[0]:
+            return True
+        return _worker_alive(int(pid), started_at)
+    except (ValueError, TypeError, AttributeError):
+        return True
+
+
+def _recover_dead_notify_claim(conn: sqlite3.Connection, key: tuple) -> bool:
+    row = conn.execute(
+        "SELECT notify_claim_owner, notify_claim_old_cursor FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
+    ).fetchone()
+    if not row or row["notify_claim_owner"] is None:
+        return True
+    if _notify_owner_alive(row["notify_claim_owner"]):
+        return False
+    conn.execute(
+        "UPDATE kanban_notify_subs SET last_event_id=notify_claim_old_cursor, "
+        "notify_claim_owner=NULL, notify_claim_old_cursor=NULL " + _SUB_KEY_WHERE, key,
+    )
+    return True
 
 
 def _cas_cursor(conn: sqlite3.Connection, key: tuple, new_cursor: int, expected: int) -> sqlite3.Cursor:
@@ -420,7 +464,8 @@ def advance_notify_cursor(
 ) -> None:
     with _kb.write_txn(conn):
         conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? " + _SUB_KEY_WHERE,
+            "UPDATE kanban_notify_subs SET last_event_id = ?, "
+            "notify_claim_owner=NULL, notify_claim_old_cursor=NULL " + _SUB_KEY_WHERE,
             (int(new_cursor), *_sub_key(task_id, platform, chat_id, thread_id)),
         )
 
@@ -452,7 +497,12 @@ def rewind_notify_cursor(
     notifier advanced the row, so retries never clobber newer progress.
     """
     with _kb.write_txn(conn):
-        cur = _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), old_cursor, claimed_cursor)
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs SET last_event_id=?, notify_claim_owner=NULL, notify_claim_old_cursor=NULL "
+            + _SUB_KEY_WHERE + " AND last_event_id=? AND notify_claim_old_cursor=? AND notify_claim_owner=?",
+            (int(old_cursor), *_sub_key(task_id, platform, chat_id, thread_id), int(claimed_cursor),
+             int(old_cursor), _notify_owner()),
+        )
     return cur.rowcount > 0
 
 

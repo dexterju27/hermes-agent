@@ -298,7 +298,8 @@ KANBAN_HEARTBEAT_SCHEMA = _schema(
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "note": _prop("string", (
                 "Optional short note describing current progress. "
-                "Shown in the event log."
+                "Shown in the event log. Prefix CHECKPOINT: to preserve a compact partial result, "
+                "evidence references and remaining work in a timeout/crash handoff (not verified completion)."
         )),
     },
     [],
@@ -456,8 +457,13 @@ KANBAN_CREATE_SCHEMA = _schema(
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
                 "dispatcher SIGTERMs the worker and re-queues the "
-                "task with outcome='timed_out'."
+                "task with outcome='timed_out', unless its failure budget is exhausted."
         )),
+        "max_retries": {
+            "type": "integer", "minimum": 1,
+            "description": "Block on the Nth failed attempt, including timeout/crash. 1 means no retries; "
+                           "3 allows two retries. Omit to use the dispatcher's configured failure limit.",
+        },
         "initial_status": {
             "type": "string",
             "enum": ["running", "blocked"],

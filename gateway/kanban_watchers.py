@@ -101,6 +101,7 @@ class GatewayKanbanWatchersMixin:
         _gc_next_at = 0.0
 
         while self._running:
+            deliveries = []
             try:
                 _gc_due = time.monotonic() >= _gc_next_at
                 _retention = 30
@@ -118,6 +119,14 @@ class GatewayKanbanWatchersMixin:
                     ).deliver()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
+            finally:
+                # ACKed deliveries no longer hold a claim, so this is a no-op
+                # for them. Release the rest when a sibling failed/cancelled,
+                # rather than stranding claims owned by this still-live process.
+                for d in deliveries:
+                    await _to_thread_process_service(
+                        self._kanban_rewind, d["sub"], d["cursor"], d.get("old_cursor", 0), d.get("board"),
+                    )
             await self._sleep_between_ticks(interval)
 
     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> None:
